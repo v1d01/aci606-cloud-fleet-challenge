@@ -1,180 +1,143 @@
 # ACI606 - Cloud Fleet Challenge
 
-Starter repository for **Exercise 4** of ACI606 Cloud Computing.
+Servicio Cloud persistente y en vivo para **ingesta de telemetría**, **inferencia en tiempo real con Machine Learning**, **observabilidad** y **panel de control de flota de robots**.
 
-## Repository name
+---
 
-Use:
+## Tabla de contenidos
 
-`aci606-cloud-fleet-challenge`
+- [URL pública del servicio](#-url-pública-del-servicio-desplegado-render)
+- [Arquitectura del sistema](#️-arquitectura-del-sistema)
+- [Evidencia del modelo de Machine Learning](#-evidencia-del-modelo-de-machine-learning)
+- [Variables de entorno](#️-variables-de-entorno-requeridas)
+- [Guía de ejecución local](#-guía-de-ejecución-local)
+- [Pruebas de humo](#-pruebas-de-humo-smoke-tests)
 
-## The idea in one sentence
+---
 
-A virtual fleet sends telemetry to a remote platform. Your group must transform the starter into a **persistent Cloud service** that stores the data, trains and serves an ML model, exposes metrics, and presents the fleet in a dashboard.
+## 🔗 URL pública del servicio desplegado (Render)
 
-## What is already provided
+| Recurso | URL |
+|---|---|
+| **URL Base** | https://aci606-cloud-fleet-challenge.onrender.com |
+| **Dashboard** | https://aci606-cloud-fleet-challenge.onrender.com/dashboard |
+| **OpenAPI / Swagger** | https://aci606-cloud-fleet-challenge.onrender.com/docs |
+| **Health Check** | https://aci606-cloud-fleet-challenge.onrender.com/health |
+| **Metrics** | https://aci606-cloud-fleet-challenge.onrender.com/metrics |
 
-- Virtual multi-robot fleet simulator.
-- Labelled dataset generator.
-- FastAPI starter service.
-- Working endpoints `/health`, `/telemetry`, `/robots` and a RAM-only `/history`.
-- Minimal web dashboard at `/dashboard`.
-- Training script skeleton.
-- Smoke test.
+---
 
-## What your group must build
+## 🏗️ Arquitectura del sistema
 
-### 1. Persistent ingestion
-Replace the starter RAM storage with persistent storage. The service must not lose the complete history when a client disconnects.
+El sistema implementa una arquitectura **PaaS desacoplada, persistente y orientada a la observabilidad**:
 
-Required endpoints:
+- **Servicio Web (PaaS):** desplegado en **Render**, ejecutando la API construida con **FastAPI** y la interfaz ASGI **Uvicorn**.
+- **Almacenamiento persistente:** base de datos **PostgreSQL** gestionada en **Neon.tech**, conectada mediante **SQLAlchemy** (driver `psycopg3` y `pool_pre_ping=True` para prevenir desconexiones tras periodos de inactividad).
+- **Servicio de inferencia ML:** pipeline cargado al inicio del servicio (`models/model.joblib`), que evalúa en tiempo real las muestras enviadas al endpoint `POST /predict`.
+- **Observabilidad y dashboard:** cobertura de métricas operacionales (solicitudes, errores, latencia promedio y tiempo de actividad) y vista web en `/dashboard`.
 
-- `GET /health`
-- `POST /telemetry`
-- `GET /robots`
-- `GET /robots/{robot_id}/history`
+---
 
-### 2. ML training
-Generate or collect a training dataset, perform EDA, compare at least two classifiers, justify the final choice, and save a reproducible model pipeline.
+## 📊 Evidencia del modelo de Machine Learning
 
-Target classes:
+Se implementó una comparación entre dos clasificadores basados en **Regresión Logística con Regularización** (Ridge vs Lasso) utilizando `scikit-learn`.
 
-- `NORMAL`
-- `WARNING`
-- `CRITICAL`
+### 1. Análisis Exploratorio de Datos (EDA)
 
-Minimum evidence:
+Distribución de clases en el dataset generado ($N = 3{,}000$):
 
-- class distribution;
-- confusion matrix;
-- macro F1;
-- train/test separation;
-- technical justification of the selected model.
+| Clase | Muestras |
+|---|---:|
+| `CRITICAL` | 2,153 |
+| `WARNING` | 534 |
+| `NORMAL` | 313 |
 
-### 3. Cloud inference service
-Implement:
+### 2. Estrategia de evaluación
 
-`POST /predict`
+- **División de datos:** `GroupShuffleSplit` basado en `robot_id` (75% entrenamiento / 25% prueba), para garantizar la evaluación sobre robots no vistos durante el entrenamiento.
+- **Métrica principal:** **F1 Macro**, que otorga el mismo peso a todas las clases independientemente de su frecuencia:
 
-Input contract:
+$$
+F1_{\text{macro}} = \frac{1}{K} \sum_{k=1}^{K} F1_k
+$$
 
-```json
-{
-  "robot_id": "R03",
-  "timestamp": 1780000000.0,
-  "x": 4.21,
-  "y": 7.82,
-  "speed": 0.63,
-  "battery": 71.0,
-  "motor_temp": 48.2,
-  "vibration": 0.43,
-  "motor_current": 3.7,
-  "obstacle_distance": 0.42
-}
-```
+### 3. Comparación de modelos
 
-Required response contract:
+| Modelo | Penalización | Solver | F1 Macro | Estado |
+|---|:---:|:---:|:---:|---|
+| Logistic Regression (Ridge) | $L_2$ | `lbfgs` | 0.6423 | ✅ **Seleccionado** |
+| Logistic Regression (Lasso) | $L_1$ | `saga` | 0.6423 | Evaluado |
 
-```json
-{
-  "robot_id": "R03",
-  "predicted_status": "WARNING",
-  "confidence": 0.87,
-  "model_version": "v1",
-  "inference_ms": 12.4
-}
-```
+### 4. Matriz de confusión
 
-### 4. Dashboard
-Extend `/dashboard` so that an operator can see, at minimum:
+Modelo seleccionado: **Ridge (L2)**.
 
-- connected robots;
-- most recent telemetry;
-- predicted condition;
-- battery;
-- at least one historical or aggregate indicator;
-- API/service status.
+| Real \ Predicción | Pred NORMAL | Pred WARNING | Pred CRITICAL |
+|---|:---:|:---:|:---:|
+| **Real NORMAL** | 0 | 0 | 0 |
+| **Real WARNING** | 1 | 33 | 4 |
+| **Real CRITICAL** | 0 | 0 | 712 |
 
-### 5. Observability
-Extend `GET /metrics` with meaningful operational data. At minimum:
+---
 
-- number of telemetry requests;
-- number of prediction requests;
-- errors;
-- average prediction latency;
-- service uptime or equivalent operational indicator.
+## 🛠️ Variables de entorno requeridas
 
-### 6. Git traceability
-Your repository must show real development history:
+En la plataforma Render se configuraron las siguientes variables de entorno:
 
-- meaningful commits;
-- at least one feature branch;
-- merge into `main`;
-- README describing how to run the system.
+| Variable | Descripción | Ejemplo / Valor |
+|---|---|---|
+| `DATABASE_URL` | Cadena de conexión PostgreSQL de Neon | `postgresql+psycopg://user:pass@ep-xyz.neon.tech/neondb?sslmode=require` |
+| `MODEL_PATH` | Ruta al pipeline binario del modelo | `models/model.joblib` |
 
-### 7. Remote execution
-The final system must be remotely consumable. A purely local notebook is not a Cloud solution.
+---
 
-## Quick start
+## 🚀 Guía de ejecución local
 
-### A. Create environment
+### Paso A: Crear y activar entorno virtual
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate  # En Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-In Codespaces you can normally use the existing Python environment instead of creating another one.
-
-### B. Start the API
-
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-Open:
-
-- `/docs`
-- `/dashboard`
-
-### C. Start the virtual fleet
-
-In another terminal:
-
-```bash
-python simulator/fleet_simulator.py --api http://127.0.0.1:8000 --robots 5
-```
-
-The dashboard should begin to show robots.
-
-### D. Generate training data
+### Paso B: Generar dataset y entrenar el modelo
 
 ```bash
 python simulator/generate_dataset.py --samples 3000
 python ml/train_model.py
 ```
 
-`train_model.py` is intentionally incomplete.
+### Paso C: Configurar variable de entorno e iniciar la API
 
-## First checkpoint - end of kickoff class
+```bash
+export DATABASE_URL="postgresql://usuario:password@ep-xyz.neon.tech/neondb?sslmode=require"
+uvicorn app.main:app --reload
+```
 
-Your group should have:
+Abre en tu navegador:
 
-- repository cloned/open in Codespaces;
-- API running;
-- simulator connected;
-- `/dashboard` showing multiple robots;
-- first meaningful Git commit;
-- feature branch created;
-- responsibilities divided within the group.
+- Dashboard: http://127.0.0.1:8000/dashboard
+- Swagger: http://127.0.0.1:8000/docs
 
-## Final challenge
+### Paso D: Conectar el simulador de la flota virtual
 
-The instructor may evaluate your service using an unseen fleet scenario. The assessment can consider functionality, prediction quality, latency, robustness and the technical defence of the architecture.
+En otra pestaña de la terminal (con el entorno `.venv` activo):
 
-## Important
+```bash
+python simulator/fleet_simulator.py --api http://127.0.0.1:8000 --robots 3
+```
 
-The robot simulator is **not** the deliverable. It is a client/load generator.
+---
 
-The deliverable is the **Cloud platform** your group builds around it.
+## 🧪 Pruebas de humo (Smoke Tests)
+
+Para verificar el cumplimiento del contrato del servicio, local o remoto:
+
+```bash
+# Prueba en entorno local
+python tests/smoke_test.py --api http://127.0.0.1:8000
+
+# Prueba en entorno remoto (Render)
+python tests/smoke_test.py --api https://aci606-cloud-fleet-challenge.onrender.com
+```

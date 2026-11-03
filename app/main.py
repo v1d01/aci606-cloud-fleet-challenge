@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+import joblib
+import numpy as np
+import pandas as pd
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -13,13 +18,13 @@ from sqlalchemy import func
 from app.db import engine, Base, get_db
 from app import models
 
-# Crear las tablas en la base de datos automáticamente al arrancar
+# Crear tablas en PostgreSQL si no existen
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title="ACI606 Cloud Fleet Challenge",
     version="0.1.0-starter",
-    description="API for the ACI606 Cloud Fleet Challenge with PostgreSQL persistence.",
+    description="API for the ACI606 Cloud Fleet Challenge with ML Inference & PostgreSQL.",
 )
 
 Status = Literal["NORMAL", "WARNING", "CRITICAL"]
@@ -42,7 +47,25 @@ class PredictionRequest(Telemetry):
     pass
 
 
+# Cargar modelo de ML al iniciar
+MODEL_PATH = os.getenv("MODEL_PATH", "models/model.joblib")
+model = None
+
+if os.path.exists(MODEL_PATH):
+    try:
+        model = joblib.load(MODEL_PATH)
+        print(f"Modelo cargado exitosamente desde {MODEL_PATH}")
+    except Exception as e:
+        print(f"Error al cargar el modelo: {e}")
+else:
+    print(f"Advertencia: No se encontró el modelo en {MODEL_PATH}")
+
+
+# Métricas operacionales en memoria
 REQUEST_COUNT = 0
+PREDICTION_COUNT = 0
+TOTAL_LATENCY_MS = 0.0
+ERROR_COUNT = 0
 
 
 @app.get("/health")
@@ -53,6 +76,7 @@ def health(db: Session = Depends(get_db)) -> dict:
         "service": "aci606-cloud-fleet",
         "version": app.version,
         "robots_in_database": unique_robots_count,
+        "model_loaded": model is not None,
         "utc": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -131,21 +155,72 @@ def robot_history(robot_id: str, db: Session = Depends(get_db)) -> list[dict]:
 
 
 @app.post("/predict")
-def predict(_: PredictionRequest) -> dict:
-    raise HTTPException(
-        status_code=501,
-        detail="/predict is part of the challenge. Train and integrate your model.",
-    )
+def predict(req: PredictionRequest) -> dict:
+    global PREDICTION_COUNT, TOTAL_LATENCY_MS, ERROR_COUNT
+
+    if model is None:
+        ERROR_COUNT += 1
+        raise HTTPException(
+            status_code=503,
+            detail="Model is not loaded on the server.",
+        )
+
+    start_time = time.perf_counter()
+
+    try:
+        # Preparar dataframe con las características del modelo
+        input_data = pd.DataFrame([{
+            "speed": req.speed,
+            "battery": req.battery,
+            "motor_temp": req.motor_temp,
+            "vibration": req.vibration,
+            "motor_current": req.motor_current,
+            "obstacle_distance": req.obstacle_distance,
+        }])
+
+        if input_data.isnull().values.any():
+            ERROR_COUNT += 1
+            raise HTTPException(status_code=400, detail="Invalid data: Contains NaN values")
+
+        # Inferencia
+        prediction = model.predict(input_data)[0]
+        probabilities = model.predict_proba(input_data)[0]
+        confidence = float(np.max(probabilities))
+
+        end_time = time.perf_counter()
+        inference_ms = round((end_time - start_time) * 1000, 2)
+
+        PREDICTION_COUNT += 1
+        TOTAL_LATENCY_MS += inference_ms
+
+        return {
+            "robot_id": req.robot_id,
+            "predicted_status": prediction,
+            "confidence": round(confidence, 4),
+            "model_version": "v1",
+            "inference_ms": inference_ms,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        ERROR_COUNT += 1
+        raise HTTPException(status_code=400, detail=f"Bad request or invalid values: {str(e)}")
 
 
 @app.get("/metrics")
 def metrics(db: Session = Depends(get_db)) -> dict:
     total_records = db.query(models.TelemetryRecord).count()
+    avg_latency = round(TOTAL_LATENCY_MS / PREDICTION_COUNT, 2) if PREDICTION_COUNT > 0 else 0.0
+
     return {
         "requests_received": REQUEST_COUNT,
+        "prediction_requests": PREDICTION_COUNT,
+        "errors": ERROR_COUNT,
+        "average_prediction_latency_ms": avg_latency,
         "total_records_stored": total_records,
         "persistence": "PostgreSQL",
-        "prediction_service": "NOT_IMPLEMENTED",
+        "prediction_service": "OPERATIONAL" if model is not None else "UNAVAILABLE",
     }
 
 

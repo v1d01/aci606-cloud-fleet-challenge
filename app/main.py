@@ -155,8 +155,8 @@ def robot_history(robot_id: str, db: Session = Depends(get_db)) -> list[dict]:
 
 
 @app.post("/predict")
-def predict(req: PredictionRequest) -> dict:
-    global PREDICTION_COUNT, TOTAL_LATENCY_MS, ERROR_COUNT
+def predict(req: PredictionRequest, db: Session = Depends(get_db)) -> dict:
+    global PREDICTION_COUNT, TOTAL_LATENCY_MS, ERROR_COUNT, REQUEST_COUNT
 
     if model is None:
         ERROR_COUNT += 1
@@ -168,7 +168,7 @@ def predict(req: PredictionRequest) -> dict:
     start_time = time.perf_counter()
 
     try:
-        # Preparar dataframe con las características del modelo
+        # 1. Preparar dataframe con las características requeridas por el modelo
         input_data = pd.DataFrame([{
             "speed": req.speed,
             "battery": req.battery,
@@ -182,7 +182,7 @@ def predict(req: PredictionRequest) -> dict:
             ERROR_COUNT += 1
             raise HTTPException(status_code=400, detail="Invalid data: Contains NaN values")
 
-        # Inferencia
+        # 2. Inferencia de Machine Learning
         prediction = model.predict(input_data)[0]
         probabilities = model.predict_proba(input_data)[0]
         confidence = float(np.max(probabilities))
@@ -190,6 +190,13 @@ def predict(req: PredictionRequest) -> dict:
         end_time = time.perf_counter()
         inference_ms = round((end_time - start_time) * 1000, 2)
 
+        # 3. Almacenar registro en PostgreSQL para reflejar datos en el Dashboard
+        record = models.TelemetryRecord(**req.model_dump())
+        db.add(record)
+        db.commit()
+
+        # Actualizar contadores operacionales
+        REQUEST_COUNT += 1
         PREDICTION_COUNT += 1
         TOTAL_LATENCY_MS += inference_ms
 

@@ -18,6 +18,8 @@ from sqlalchemy import func
 from app.db import engine, Base, get_db
 from app import models
 
+from fastapi.responses import HTMLResponse, RedirectResponse
+
 # Crear tablas en PostgreSQL si no existen
 Base.metadata.create_all(bind=engine)
 
@@ -235,3 +237,8 @@ def metrics(db: Session = Depends(get_db)) -> dict:
 def dashboard() -> str:
     path = Path(__file__).resolve().parents[1] / "dashboard" / "index.html"
     return path.read_text(encoding="utf-8")
+
+@app.get("/")
+def root():
+    """Redirige automáticamente la raíz de la aplicación hacia el Dashboard interactivo."""
+    return RedirectResponse(url="/dashboard")
